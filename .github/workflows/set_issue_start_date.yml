@@ -1,0 +1,138 @@
+name: Set Issue Start Date in Projects
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  set-start-date:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if issue contains trigger keyword
+        id: check-keyword
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueBody = context.payload.issue.body || '';
+            const triggerKeyword = '/* auto_complete_start_date */';
+            const shouldTrigger = issueBody.includes(triggerKeyword);
+            
+            console.log(`Issue body contains trigger keyword: ${shouldTrigger}`);
+            
+            return shouldTrigger;
+      
+      - name: Set start date in project
+        if: steps.check-keyword.outputs.result == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            console.log(`Processing issue #${issueNumber}`);
+            console.log(`Processing issue #${owner}`);
+            console.log(`Processing issue #${repo}`);
+            
+            try {
+              // 今日の日付を取得（YYYY-MM-DD形式）
+              const today = new Date().toISOString().split('T')[0];
+              console.log(`Today's date: ${today}`);
+              
+              // Issueに紐づくProjectsを取得
+              const projectsQuery = `
+                query($owner: String!, $repo: String!, $issueNumber: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    issue(number: $issueNumber) {
+                      projectItems(first: 10) {
+                        nodes {
+                          id
+                          project {
+                            id
+                            title
+                            fields(first: 20) {
+                              nodes {
+                                ... on ProjectV2Field {
+                                  id
+                                  name
+                                  dataType
+                                }
+                                ... on ProjectV2SingleSelectField {
+                                  id
+                                  name
+                                  dataType
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              
+              const projectsResult = await github.graphql(projectsQuery, {
+                owner: owner,
+                repo: repo,
+                issueNumber: issueNumber
+              });
+              
+              const projectItems = projectsResult.repository.issue.projectItems.nodes;
+              
+              if (projectItems.length === 0) {
+                console.log('No projects found for this issue');
+                return;
+              }
+              
+              // 各プロジェクトアイテムに対して処理
+              for (const projectItem of projectItems) {
+                const project = projectItem.project;
+                console.log(`Processing project: ${project.title}`);
+                
+                // 「開始日」フィールドを探す
+                const startDateField = project.fields.nodes.find(field => 
+                  field.name === '開始日' && field.dataType === 'DATE'
+                );
+                
+                if (!startDateField) {
+                  console.log(`Start date field not found in project: ${project.title}`);
+                  continue;
+                }
+                
+                console.log(`Found start date field: ${startDateField.name}`);
+                
+                // プロジェクトアイテムのフィールド値を更新
+                const updateMutation = `
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
+                    updateProjectV2ItemFieldValue(input: {
+                      projectId: $projectId
+                      itemId: $itemId
+                      fieldId: $fieldId
+                      value: $value
+                    }) {
+                      projectV2Item {
+                        id
+                      }
+                    }
+                  }
+                `;
+                
+                await github.graphql(updateMutation, {
+                  projectId: project.id,
+                  itemId: projectItem.id,
+                  fieldId: startDateField.id,
+                  value: {
+                    date: today
+                  }
+                });
+                
+                console.log(`Successfully set start date to ${today} for project: ${project.title}`);
+              }
+              
+            } catch (error) {
+              console.error('Error setting start date:', error);
+              core.setFailed(`Failed to set start date: ${error.message}`);
+            }
